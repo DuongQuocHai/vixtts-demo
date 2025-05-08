@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  vixtts:
+    build: .
+    container_name: vixtts-dev
+    volumes:
+      - .:/app
+      - vixtts-model-cache:/app/model
+    ports:
+      - "8765:8765"
+    working_dir: /app
+    command: ["python", "server.py", "--host", "0.0.0.0", "--port", "8765"]
+volumes:
+  vixtts-model-cache: 
