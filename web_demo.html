@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>viXTTS WebSocket Demo</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        #status { margin-top: 10px; color: #007700; }
+        #audio-player { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h2>viXTTS WebSocket Demo</h2>
+    <label for="tts-text">Nhập văn bản:</label><br>
+    <textarea id="tts-text" rows="4" cols="60">Xin chào, đây là demo chuyển văn bản thành giọng nói!</textarea><br>
+    <button id="send-btn">Gửi và phát âm thanh</button>
+    <div id="status"></div>
+    <div id="audio-player"></div>
+    <script>
+        const wsUrl = "ws://localhost:8765";
+        let audioChunks = [];
+        let audioFormat = null;
+        let audioContext = null;
+        let sourceNode = null;
+
+        function playPCM(pcmBytes, sampleRate) {
+            // Chuyển PCM int16 sang Float32
+            const int16 = new Int16Array(pcmBytes.buffer);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / 32768;
+            }
+            // Tạo AudioBuffer
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const buffer = audioContext.createBuffer(1, float32.length, sampleRate);
+            buffer.getChannelData(0).set(float32);
+            // Phát âm thanh
+            if (sourceNode) sourceNode.disconnect();
+            sourceNode = audioContext.createBufferSource();
+            sourceNode.buffer = buffer;
+            sourceNode.connect(audioContext.destination);
+            sourceNode.start();
+        }
+
+        document.getElementById('send-btn').onclick = function() {
+            const text = document.getElementById('tts-text').value.trim();
+            if (!text) {
+                document.getElementById('status').textContent = 'Vui lòng nhập văn bản.';
+                return;
+            }
+            document.getElementById('status').textContent = 'Đang kết nối WebSocket...';
+            audioChunks = [];
+            audioFormat = null;
+            if (sourceNode) sourceNode.disconnect();
+            // Kết nối WebSocket
+            const ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = function() {
+                document.getElementById('status').textContent = 'Đã kết nối. Đang gửi yêu cầu...';
+                ws.send(JSON.stringify({ text: text, lang: 'en' }));
+            };
+            ws.onmessage = function(event) {
+                if (typeof event.data === 'string') {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.status === 'start') {
+                            audioFormat = msg;
+                            audioChunks = [];
+                            document.getElementById('status').textContent = 'Đang nhận dữ liệu âm thanh...';
+                        } else if (msg.status === 'done') {
+                            // Ghép các chunk lại và phát
+                            const pcm = new Uint8Array(audioChunks.reduce((acc, cur) => acc + cur.byteLength, 0));
+                            let offset = 0;
+                            for (const chunk of audioChunks) {
+                                pcm.set(new Uint8Array(chunk), offset);
+                                offset += chunk.byteLength;
+                            }
+                            playPCM(pcm, audioFormat.sample_rate);
+                            document.getElementById('status').textContent = 'Đã phát xong.';
+                        } else if (msg.error) {
+                            document.getElementById('status').textContent = 'Lỗi: ' + msg.error;
+                        }
+                    } catch (e) {
+                        // Không phải JSON, bỏ qua
+                    }
+                } else {
+                    // Nhận chunk PCM
+                    audioChunks.push(event.data);
+                }
+            };
+            ws.onerror = function(e) {
+                document.getElementById('status').textContent = 'Lỗi WebSocket.';
+            };
+            ws.onclose = function() {
+                // Không làm gì
+            };
+        };
+    </script>
+</body>
+</html> 

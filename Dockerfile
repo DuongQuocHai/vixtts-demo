@@ -18,7 +18,7 @@ RUN rm -rf TTS/ && git clone --branch add-vietnamese-xtts https://github.com/thi
 # Cài đặt các thư viện Python
 RUN pip install --upgrade pip
 RUN pip install --use-deprecated=legacy-resolver -e TTS
-RUN pip install deepspeed vinorm==2.0.7 cutlet unidic==1.1.0 underthesea deepfilternet==0.5.6 websockets huggingface_hub
+RUN pip install numpy=1.26.4 deepspeed cutlet unidic==1.1.0 underthesea deepfilternet==0.5.6 websockets huggingface_hub
 
 # Tải model viXTTS từ HuggingFace
 RUN python -m unidic download
@@ -36,4 +36,4 @@ COPY assets ./assets
 EXPOSE 8765
 
 # Lệnh mặc định: chạy server websocket
-CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8765"] 
+CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8765"]

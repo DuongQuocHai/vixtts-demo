@@ -1,30 +1,29 @@
 import asyncio
 import websockets
 import os
+import signal
 import torch
 import torchaudio
-import tempfile
-import subprocess
-import logging
-from underthesea import sent_tokenize
+from underthesea import sent_tokenize, text_normalize
 from unidecode import unidecode
 
-from vinorm import TTSnorm
 from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 
 from datetime import datetime
 import string
+import wave
+import aiofiles
 
 # =====================
 # CẤU HÌNH ĐƯỜNG DẪN VÀ THÔNG SỐ
 # =====================
 # Thư mục chứa model, audio mẫu và output
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
-REFERENCE_AUDIO = os.path.join(MODEL_DIR, "vi_sample.wav")  # File audio mẫu mặc định
+REFERENCE_AUDIO = os.path.join(MODEL_DIR, "samples/nu-luu-loat.wav")  # File audio mẫu mặc định
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-CHUNK_SIZE = 4096  # Kích thước mỗi chunk gửi qua websocket (bytes)
+CHUNK_SIZE = 4 * 1024  # Kích thước mỗi chunk gửi qua websocket (bytes) 4kb
 
 # =====================
 # HÀM LOAD MÔ HÌNH TTS
@@ -76,11 +75,12 @@ def calculate_keep_len(text, lang):
     return -1
 
 def normalize_vietnamese_text(text):
-    # Chuẩn hóa văn bản tiếng Việt (dùng vinorm)
+    # Chuẩn hóa văn bản tiếng Việt (dùng underthesea)
     print(f"[INFO] Chuẩn hóa tiếng Việt: {text}")
     try:
+        text = text_normalize(text)
         text = (
-            TTSnorm(text, unknown=False, lower=False, rule=True)
+            text
             .replace("..", ".")
             .replace("!.", "!")
             .replace("?.", "?")
@@ -100,38 +100,53 @@ def normalize_vietnamese_text(text):
 # =====================
 # HÀM CHẠY TTS (TEXT -> WAV)
 # =====================
-def run_tts(model, lang, tts_text, speaker_audio_file, normalize_text=True):
-    # Sinh audio từ text sử dụng mô hình XTTS
+def run_tts(model, lang, tts_text, speaker_audio_file, normalize_text=True, isChunk=False):
     try:
         if model is None or not speaker_audio_file:
             raise RuntimeError("Model or reference audio not loaded!")
         output_dir = OUTPUT_DIR
         os.makedirs(output_dir, exist_ok=True)
-        # Lấy latent từ audio mẫu
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
             audio_path=speaker_audio_file,
             gpt_cond_len=model.config.gpt_cond_len,
             max_ref_length=model.config.max_ref_len,
             sound_norm_refs=model.config.sound_norm_refs,
         )
-        # Chuẩn hóa text nếu là tiếng Việt
         if normalize_text and lang == "vi":
             tts_text = normalize_vietnamese_text(tts_text)
 
-        # Tách câu
-        if lang in ["ja", "zh-cn"]:
-            tts_texts = tts_text.split("。")
-        else:
-            tts_texts = sent_tokenize(tts_text)
-        print(f"[INFO] TTS input (chuẩn hóa): {tts_text}")
-        print(f"[INFO] Ngôn ngữ synthesize: {lang}")
         wav_chunks = []
-        for text in tts_texts:
-            if text.strip() == "":
-                continue
-            # Sinh audio cho từng câu
+        if isChunk:
+            if lang in ["ja", "zh-cn"]:
+                tts_texts = tts_text.split("。")
+            else:
+                tts_texts = sent_tokenize(tts_text)
+            print(f"[INFO] TTS input (chuẩn hóa): {tts_text}")
+            print(f"[INFO] Ngôn ngữ synthesize: {lang}")
+            for text in tts_texts:
+                print(f"[DEBUG] Đang synthesize câu: {text}")
+                if text.strip() == "":
+                    continue
+                wav_chunk = model.inference(
+                    text=text,
+                    language=lang,
+                    gpt_cond_latent=gpt_cond_latent,
+                    speaker_embedding=speaker_embedding,
+                    temperature=0.3,
+                    length_penalty=1.0,
+                    repetition_penalty=10.0,
+                    top_k=30,
+                    top_p=0.85,
+                    enable_text_splitting=True,
+                )
+                keep_len = calculate_keep_len(text, lang)
+                wav_chunk["wav"] = torch.tensor(wav_chunk["wav"][:keep_len])
+                wav_chunks.append(wav_chunk["wav"])
+        else:
+            print(f"[INFO] TTS input (không chunk): {tts_text}")
+            print(f"[INFO] Ngôn ngữ synthesize: {lang}")
             wav_chunk = model.inference(
-                text=text,
+                text=tts_text,
                 language=lang,
                 gpt_cond_latent=gpt_cond_latent,
                 speaker_embedding=speaker_embedding,
@@ -140,14 +155,16 @@ def run_tts(model, lang, tts_text, speaker_audio_file, normalize_text=True):
                 repetition_penalty=10.0,
                 top_k=30,
                 top_p=0.85,
+                enable_text_splitting=True,
             )
-            keep_len = calculate_keep_len(text, lang)
+            keep_len = calculate_keep_len(tts_text, lang)
             wav_chunk["wav"] = torch.tensor(wav_chunk["wav"][:keep_len])
             wav_chunks.append(wav_chunk["wav"])
-        # Ghép các đoạn audio lại
         out_wav = torch.cat(wav_chunks, dim=0).unsqueeze(0)
         out_path = os.path.join(output_dir, f"{get_file_name(tts_text)}.wav")
-        torchaudio.save(out_path, out_wav, 24000)
+        # Chuyển sang int16 trước khi lưu để wave đọc được
+        out_wav_int16 = (out_wav * 32767).clamp(-32768, 32767).short()
+        torchaudio.save(out_path, out_wav_int16, 24000, encoding="PCM_S", bits_per_sample=16)
         return out_path
     except Exception as e:
         print(f"[ERROR] Lỗi trong run_tts: {e}")
@@ -160,53 +177,63 @@ def run_tts(model, lang, tts_text, speaker_audio_file, normalize_text=True):
 async def tts_handler(websocket):
     print(f"[INFO] Client connected: {websocket.remote_address}")
     try:
-        # Nhận JSON từ client: {"text": ..., "lang": ..., "reference_audio": ...}
+        # Nhận JSON từ client: {"text": ..., "lang": ..., "reference_audio": ..., "isChunk": ..., "isCache": ...}
         import json
-        data = await websocket.recv()
-        print(f"[INFO] Đã nhận message từ client {websocket.remote_address}: {data}")
-        try:
-            req = json.loads(data)
-            text = req.get("text", "")
-            lang = req.get("lang", "vi")
-            reference_audio = req.get("reference_audio", REFERENCE_AUDIO)
-        except Exception as e:
-            print(f"[ERROR] Lỗi parse input từ client {websocket.remote_address}: {e}")
-            await websocket.send(json.dumps({"error": "Invalid input format. Expect JSON with 'text', 'lang', 'reference_audio'."}))
-            return
-        if not text or len(text.strip()) < 3:
-            print(f"[ERROR] Text input quá ngắn từ client {websocket.remote_address}: '{text}'")
-            await websocket.send(json.dumps({"error": "Text input too short."}))
-            return
-        # Chạy TTS để sinh file WAV
-        try:
-            audio_path = run_tts(tts_model, lang, text, reference_audio)
-        except Exception as e:
-            print(f"[ERROR] Lỗi khi chạy TTS cho client {websocket.remote_address}: {e}")
-            await websocket.send(json.dumps({"error": f"TTS error: {str(e)}"}))
-            return
-        # Đọc file WAV, chuyển thành raw PCM int16
-        wav_tensor, sr = torchaudio.load(audio_path)
-        # Đảm bảo mono
-        if wav_tensor.shape[0] > 1:
-            wav_tensor = wav_tensor.mean(dim=0, keepdim=True)
-        wav_tensor = (wav_tensor * 32767).clamp(-32768, 32767).short()  # convert to int16 PCM
-        pcm_bytes = wav_tensor.numpy().tobytes()
-        # Gửi header JSON đầu tiên (thông tin định dạng audio)
-        await websocket.send(json.dumps({
-            "audio_format": "pcm",
-            "sample_rate": sr,
-            "sample_width": 2,
-            "channels": 1,
-            "dtype": "int16",
-            "status": "start"
-        }))
-        # Gửi từng chunk PCM bytes
-        for i in range(0, len(pcm_bytes), CHUNK_SIZE):
-            await websocket.send(pcm_bytes[i:i+CHUNK_SIZE])
-        # Gửi thông báo hoàn thành
-        await websocket.send(json.dumps({"status": "done"}))
-    except websockets.exceptions.ConnectionClosed:
-        print(f"[INFO] Client disconnected: {websocket.remote_address}")
+        async for data in websocket:
+            print(f"[INFO] Đã nhận message từ client {websocket.remote_address}: {data}")
+            try:
+                req = json.loads(data)
+                text = req.get("text", "")
+                lang = req.get("lang", "vi")
+                reference_audio = req.get("reference_audio", REFERENCE_AUDIO)
+                is_chunk = req.get("isChunk", False)
+                is_cache = req.get("isCache", False)
+            except Exception as e:
+                print(f"[ERROR] Lỗi parse input từ client {websocket.remote_address}: {e}")
+                await websocket.send(json.dumps({"error": "Invalid input format. Expect JSON with 'text', 'lang', 'reference_audio', 'isChunk', 'isCache'."}))
+                return
+
+            # Chạy TTS để sinh file WAV
+            try:
+                audio_path = run_tts(tts_model, lang, text, reference_audio, isChunk=is_chunk)
+            except Exception as e:
+                print(f"[ERROR] Lỗi khi chạy TTS cho client {websocket.remote_address}: {e}")
+                await websocket.send(json.dumps({"error": f"TTS error: {str(e)}"}))
+                return
+            
+            # Đọc thông tin WAV header
+            with wave.open(audio_path, 'rb') as wf:
+                sr = wf.getframerate()
+                sample_width = wf.getsampwidth()
+                channels = wf.getnchannels()
+            # Gửi header JSON đầu tiên (thông tin định dạng audio)
+            await websocket.send(json.dumps({
+                "audio_format": "pcm",
+                "sample_rate": sr,
+                "sample_width": sample_width,
+                "channels": channels,
+                "dtype": "int16",
+                "status": "start"
+            }))
+            # Gửi từng chunk PCM bytes từ file WAV (bỏ header 44 bytes)
+            async with aiofiles.open(audio_path, mode='rb') as f:
+                await f.seek(44)  # Bỏ header WAV
+                while True:
+                    chunk = await f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    await websocket.send(chunk)
+            # Gửi thông báo hoàn thành
+            await websocket.send(json.dumps({"status": "done"}))
+            # Xóa file nếu không cache
+            if not is_cache:
+                try:
+                    os.remove(audio_path)
+                    print(f"[INFO] Đã xóa file output: {audio_path}")
+                except Exception as e:
+                    print(f"[ERROR] Không thể xóa file output: {audio_path}, lỗi: {e}")
+    except websockets.exceptions.ConnectionClosed as e:
+        print(f"[INFO] Client disconnected: {websocket.remote_address}. Reason: {e}")
         pass
     except Exception as e:
         print(f"[ERROR] Lỗi không xác định với client {websocket.remote_address}: {e}")
@@ -234,9 +261,16 @@ if __name__ == "__main__":
     print("[INFO] Đang khởi tạo WebSocket server...")
 
     async def main():
-        async with websockets.serve(tts_handler, args.host, args.port, max_size=None, max_queue=None):
-            print(f"[INFO] WebSocket server đã sẵn sàng tại ws://{args.host}:{args.port}")
-            print("[INFO] Đang chờ client kết nối...")
-            await asyncio.Future()  # Run forever
+        try:
+            async with websockets.serve(tts_handler, args.host, args.port, max_size=None, max_queue=None):
+                print(f"[INFO] WebSocket server đã sẵn sàng tại ws://{args.host}:{args.port}")
+                print("[INFO] Đang chờ client kết nối...")
+                await asyncio.Future()  # Run forever
+        except Exception as e:
+            print(f"[ERROR] Lỗi khi khởi động hoặc chạy WebSocket server: {e}")
 
-    asyncio.run(main()) 
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Server stopped by user (Ctrl+C). Terminating process group...")
+        os.killpg(os.getpgrp(), signal.SIGTERM) 
