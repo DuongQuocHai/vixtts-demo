@@ -18,7 +18,7 @@ RUN rm -rf TTS/ && git clone --branch add-vietnamese-xtts https://github.com/thi
 # Cài đặt các thư viện Python
 RUN pip install --upgrade pip
 RUN pip install --use-deprecated=legacy-resolver -e TTS
-RUN pip install numpy==1.26.4 deepspeed cutlet unidic==1.1.0 underthesea deepfilternet==0.5.6 websockets huggingface_hub
+RUN pip install numpy==1.26.4 deepspeed cutlet unidic==1.1.0 underthesea deepfilternet==0.5.6 websockets huggingface_hub aiofiles
 
 # Tải model viXTTS từ HuggingFace
 RUN python -m unidic download
