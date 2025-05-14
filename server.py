@@ -9,6 +9,7 @@ from unidecode import unidecode
 
 from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
+from vinorm import TTSnorm
 
 from datetime import datetime
 import string
@@ -20,7 +21,7 @@ import aiofiles
 # =====================
 # Thư mục chứa model, audio mẫu và output
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
-REFERENCE_AUDIO = os.path.join(MODEL_DIR, "samples/nu-luu-loat.wav")  # File audio mẫu mặc định
+REFERENCE_AUDIO = os.path.join(MODEL_DIR, "vi_sample.wav")  # File audio mẫu mặc định
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 CHUNK_SIZE = 4 * 1024  # Kích thước mỗi chunk gửi qua websocket (bytes) 4kb
@@ -78,9 +79,8 @@ def normalize_vietnamese_text(text):
     # Chuẩn hóa văn bản tiếng Việt (dùng underthesea)
     print(f"[INFO] Chuẩn hóa tiếng Việt: {text}")
     try:
-        text = text_normalize(text)
         text = (
-            text
+            TTSnorm(text, unknown=False, lower=False, rule=True)
             .replace("..", ".")
             .replace("!.", "!")
             .replace("?.", "?")
